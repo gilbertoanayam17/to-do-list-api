@@ -39,3 +39,27 @@ variable "repo_branch" {
   type        = string
   default     = "main"
 }
+
+variable "instance_profile_name" {
+  description = "Instance profile con permiso para leer el secreto (LabInstanceProfile en AWS Academy)"
+  type        = string
+  default     = "LabInstanceProfile"
+}
+
+variable "db_instance_class" {
+  description = "Tamaño de la instancia RDS"
+  type        = string
+  default     = "db.t3.micro"
+}
+
+variable "db_name" {
+  description = "Nombre de la base de datos"
+  type        = string
+  default     = "todo"
+}
+
+variable "db_username" {
+  description = "Usuario administrador de la base de datos"
+  type        = string
+  default     = "todo_admin"
+}

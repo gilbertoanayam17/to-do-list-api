@@ -1,2 +1,5 @@
 flask==3.1.3
 gunicorn>=23
+boto3>=1.34
+# [rsa] instala cryptography, necesario para caching_sha2_password de MySQL 8
+PyMySQL[rsa]==1.2.3
