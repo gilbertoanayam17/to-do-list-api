@@ -1,0 +1,16 @@
+# Python
+.venv/
+venv/
+__pycache__/
+*.pyc
+
+# Terraform: el state puede contener secretos (llave privada, password de la BD)
+.terraform/
+*.tfstate
+*.tfstate.*
+*.tfvars
+crash.log
+.terraform.tfstate.lock.info
+
+# Llaves SSH generadas
+*.pem
