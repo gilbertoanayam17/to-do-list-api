@@ -1,0 +1,61 @@
+name: Deploy
+
+# Continuous Deployment: la EC2 descarga el zip del release y reinicia la app con esa versión.
+# Lo llama Release al publicar un tag; también se puede correr a mano para redesplegar
+# un release existente (por ejemplo, después de levantar la infra en un sandbox nuevo).
+on:
+  workflow_call:
+    inputs:
+      tag:
+        required: true
+        type: string
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag del release a desplegar (ej. v1.0.0)"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    # Un deploy a la vez sobre la EC2.
+    concurrency:
+      group: deploy
+      cancel-in-progress: false
+    env:
+      TAG: ${{ inputs.tag }}
+      REPO: ${{ github.repository }}
+      EC2_HOST: ${{ secrets.EC2_HOST }}
+    steps:
+      # Usa el deploy.sh de la versión que se despliega.
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag }}
+
+      - name: Configurar llave SSH
+        env:
+          EC2_SSH_KEY: ${{ secrets.EC2_SSH_KEY }}
+        run: |
+          install -m 700 -d ~/.ssh
+          printf '%s\n' "$EC2_SSH_KEY" > ~/.ssh/ec2
+          chmod 600 ~/.ssh/ec2
+          ssh-keyscan -H "$EC2_HOST" >> ~/.ssh/known_hosts
+
+      - name: Desplegar en la EC2
+        run: ssh -i ~/.ssh/ec2 "ubuntu@$EC2_HOST" "sudo bash -s -- '$REPO' '$TAG'" < scripts/deploy.sh
+
+      - name: Verificar desde internet
+        run: |
+          VERSION=$(curl -fsS "http://$EC2_HOST:8000/version")
+          echo "$VERSION"
+          [[ "$VERSION" == *"\"$TAG\""* ]] || { echo "La EC2 no responde con $TAG"; exit 1; }
+          {
+            echo "## Desplegado $TAG"
+            echo ""
+            echo "- http://$EC2_HOST:8000/version"
+            echo "- http://$EC2_HOST:8000/tasks"
+          } >> "$GITHUB_STEP_SUMMARY"

@@ -1,0 +1,40 @@
+name: Release
+
+# Continuous Delivery: al empujar un tag v#.#.# se prueban los cambios, se crea un release
+# con el repo en zip y se manda a desplegar.
+on:
+  push:
+    tags: ["v[0-9]+.[0-9]+.[0-9]+"]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    uses: ./.github/workflows/ci.yml
+
+  release:
+    needs: test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # para crear el release
+    env:
+      TAG: ${{ github.ref_name }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Comprimir el repositorio
+        run: git archive --format=zip --prefix=to-do-list-api/ -o "to-do-list-api-$TAG.zip" HEAD
+
+      - name: Crear release en GitHub
+        run: gh release create "$TAG" "to-do-list-api-$TAG.zip" --title "$TAG" --generate-notes
+
+  # Un release creado con GITHUB_TOKEN no dispara otros workflows (on: release), así que el
+  # deploy se encadena aquí al terminar el release.
+  deploy:
+    needs: release
+    uses: ./.github/workflows/deploy.yml
+    with:
+      tag: ${{ github.ref_name }}
+    secrets: inherit
