@@ -9,6 +9,11 @@ credenciales se leen de AWS Secrets Manager. Toda la infraestructura sale de Ter
 | GET    | `/tasks`   | Regresa la lista de tareas          |
 | POST   | `/tasks`   | Agrega una tarea `{"tarea": "..."}` |
 | GET    | `/version` | Versión desplegada `{"version": "v1.0.0"}` |
+| GET    | `/health`  | Estado: BD (`SELECT 1`), versión y timestamp. 200 si la BD responde, 503 si no |
+
+```json
+{"status": "OK", "database": "OK", "version": "v1.1.0", "timestamp": "2026-11-05T23:03:08+00:00"}
+```
 
 ## Configuración
 
@@ -48,6 +53,11 @@ pytest -v
 | [Release](.github/workflows/release.yml) | push de tag `v#.#.#` | **Continuous Delivery**: corre las pruebas, crea un release con el repo en zip y llama a Deploy |
 | [Deploy](.github/workflows/deploy.yml) | lo llama Release, o a mano con un tag | **Continuous Deployment**: por SSH, la EC2 descarga el zip del release ([scripts/deploy.sh](scripts/deploy.sh)), reinicia la app y verifica `/version`; si no responde, regresa a la versión anterior |
 | [Infra - apply / destroy](.github/workflows/infra-apply.yml) | a mano | Terraform con el tfstate en S3 (ver [terraform/](terraform/)) |
+| [Monitor](.github/workflows/monitor.yml) | `schedule` cada 5 min (o a mano) | `GET /health`; si no responde 200 el run falla y GitHub avisa por correo |
+
+El monitor solo corre desde `main`, y GitHub puede retrasar los runs programados. Cuando el lab
+se apaga la EC2 deja de responder y el monitor falla cada 5 minutos: desactívalo en
+**Actions → Monitor → ⋯ → Disable workflow** cuando termines.
 
 Deploy se encadena desde Release en lugar de usar `on: release`, porque un release creado con
 `GITHUB_TOKEN` no dispara otros workflows.

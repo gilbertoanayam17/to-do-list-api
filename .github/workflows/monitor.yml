@@ -1,0 +1,39 @@
+name: Monitor
+
+# Revisa GET /health cada 5 minutos; si no responde 200, el run falla y GitHub manda un aviso.
+# Notas de schedule:
+# - Solo corre desde la rama por defecto (main).
+# - 5 minutos es el mínimo; GitHub puede retrasar o saltarse runs cuando hay mucha carga.
+# - Cuando termines (o se apague el lab), desactívalo: Actions > Monitor > ... > Disable workflow.
+on:
+  schedule:
+    - cron: "*/5 * * * *"
+  workflow_dispatch: # para probarlo a mano
+
+permissions: {}
+
+jobs:
+  health:
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: GET /health
+        env:
+          EC2_HOST: ${{ secrets.EC2_HOST }}
+        run: |
+          # --retry: reintenta fallas transitorias para no alertar por un solo paquete perdido.
+          CODE=$(curl -s -o health.json -w '%{http_code}' --max-time 10 \
+            --retry 2 --retry-delay 5 "http://$EC2_HOST:8000/health" || true)
+          BODY=$(cat health.json 2>/dev/null || echo "(sin respuesta)")
+          echo "HTTP $CODE"
+          echo "$BODY"
+          {
+            echo "## /health: HTTP $CODE"
+            echo '```json'
+            echo "$BODY"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          if [ "$CODE" != "200" ]; then
+            echo "::error::GET /health respondió HTTP $CODE (se esperaba 200)"
+            exit 1
+          fi

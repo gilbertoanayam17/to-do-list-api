@@ -1,3 +1,5 @@
+from datetime import datetime
+
 import pytest
 
 import app as todo
@@ -14,6 +16,7 @@ def client(monkeypatch):
 
     monkeypatch.setattr(todo, "fetch_tasks", lambda: list(tasks))
     monkeypatch.setattr(todo, "insert_task", fake_insert)
+    monkeypatch.setattr(todo, "check_db", lambda: None)
     return todo.app.test_client()
 
 
@@ -48,3 +51,29 @@ def test_version_lee_variable_de_ambiente(client, monkeypatch):
 
     assert response.status_code == 200
     assert response.get_json() == {"version": "v1.2.3"}
+
+
+def test_health_ok_con_version_y_timestamp(client, monkeypatch):
+    monkeypatch.setenv("APP_VERSION", "v1.2.3")
+
+    response = client.get("/health")
+
+    assert response.status_code == 200
+    body = response.get_json()
+    assert body["status"] == "OK"
+    assert body["database"] == "OK"
+    assert body["version"] == "v1.2.3"
+    assert datetime.fromisoformat(body["timestamp"]).tzinfo is not None
+
+
+def test_health_regresa_503_si_falla_la_bd(client, monkeypatch):
+    def db_caida():
+        raise ConnectionError("RDS no responde")
+
+    monkeypatch.setattr(todo, "check_db", db_caida)
+
+    response = client.get("/health")
+
+    assert response.status_code == 503
+    assert response.get_json()["status"] == "FAIL"
+    assert response.get_json()["database"] == "FAIL"
