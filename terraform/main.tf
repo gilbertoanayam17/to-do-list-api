@@ -1,12 +1,16 @@
 terraform {
+  # El tfstate vive en S3 para que GitHub Actions (y cualquier máquina) compartan el mismo estado.
+  # El bucket lleva el ID de la cuenta, así que se pasa en el init: ver scripts/tf-init.sh
+  backend "s3" {
+    key     = "to-do-list/terraform.tfstate"
+    region  = "us-east-1"
+    encrypt = true
+  }
+
   required_providers {
     aws = {
       source  = "hashicorp/aws"
       version = "~> 5.0"
-    }
-    tls = {
-      source  = "hashicorp/tls"
-      version = "~> 4.0"
     }
     random = {
       source  = "hashicorp/random"
@@ -51,15 +55,12 @@ data "aws_ami" "ubuntu" {
   }
 }
 
-### SSH KEY (creada por Terraform)
-resource "tls_private_key" "ssh" {
-  algorithm = "RSA"
-  rsa_bits  = 4096
-}
-
+### SSH KEY
+# La llave pública vive en el repo; la privada solo en el secret EC2_SSH_KEY de GitHub.
+# Así la llave no cambia en cada sandbox nuevo y el workflow de deploy siempre puede entrar.
 resource "aws_key_pair" "todo-key" {
   key_name   = "${var.project_name}-key"
-  public_key = tls_private_key.ssh.public_key_openssh
+  public_key = file("${path.module}/deploy_key.pub")
 }
 
 ### SECURITY GROUP

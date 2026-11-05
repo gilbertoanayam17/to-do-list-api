@@ -1,0 +1,43 @@
+name: Infra - destroy
+
+# Se dispara a mano y pide escribir "destroy" para evitar borrar todo por un clic accidental.
+on:
+  workflow_dispatch:
+    inputs:
+      confirmacion:
+        description: 'Escribe "destroy" para confirmar'
+        required: true
+        type: string
+
+concurrency:
+  group: terraform
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  destroy:
+    if: inputs.confirmacion == 'destroy'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
+          aws-region: us-east-1
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "~1.13.0"
+          terraform_wrapper: false
+
+      - name: terraform init (backend S3)
+        run: bash scripts/tf-init.sh -backend-config=use_lockfile=true
+
+      # El bucket del tfstate no lo administra Terraform, así que sobrevive al destroy.
+      - name: terraform destroy
+        run: terraform -chdir=terraform destroy -input=false -auto-approve

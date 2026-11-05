@@ -3,15 +3,20 @@
 exec > >(tee /var/log/user-data.log) 2>&1
 set -euxo pipefail
 
+# Código en $APP_DIR/app y venv aparte en $APP_DIR/venv: el deploy (scripts/deploy.sh)
+# reemplaza solo app/ con cada release.
 APP_DIR=/opt/todo
 
 apt-get update -y
-apt-get install -y git python3-venv mysql-client jq
+apt-get install -y git python3-venv mysql-client jq unzip
 
-git clone --branch "${repo_branch}" "${repo_url}" "$APP_DIR"
+git clone --branch "${repo_branch}" "${repo_url}" "$APP_DIR/app"
 python3 -m venv "$APP_DIR/venv"
-"$APP_DIR/venv/bin/pip" install -r "$APP_DIR/requirements.txt"
+"$APP_DIR/venv/bin/pip" install -r "$APP_DIR/app/requirements.txt"
 chown -R ubuntu:ubuntu "$APP_DIR"
+
+# Versión que expone GET /version. Al boot sale del repo; cada deploy la reescribe con el tag.
+echo "APP_VERSION=$(git -C "$APP_DIR/app" describe --tags --always)" > /etc/todo.env
 
 # systemd arranca la app en cada boot y la reinicia si se cae.
 # La app solo conoce el nombre del secreto; las credenciales las lee de Secrets Manager.
@@ -24,9 +29,10 @@ Wants=network-online.target
 
 [Service]
 User=ubuntu
-WorkingDirectory=$APP_DIR
+WorkingDirectory=$APP_DIR/app
 Environment=AWS_REGION=${region}
 Environment=DB_SECRET_ID=${db_secret_id}
+EnvironmentFile=/etc/todo.env
 ExecStart=$APP_DIR/venv/bin/gunicorn --bind 0.0.0.0:${app_port} --workers 2 app:app
 Restart=always
 RestartSec=5

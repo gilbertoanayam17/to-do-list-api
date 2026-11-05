@@ -22,9 +22,3 @@ output "db_secret_name" {
   description = "Secreto de Secrets Manager con las credenciales de la BD"
   value       = aws_secretsmanager_secret.db.name
 }
-
-output "private_key_pem" {
-  description = "Llave privada para conectarse a la EC2 por SSH"
-  value       = tls_private_key.ssh.private_key_pem
-  sensitive   = true // no se va a imprimir
-}

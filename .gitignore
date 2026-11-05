@@ -14,3 +14,7 @@ crash.log
 
 # Llaves SSH generadas
 *.pem
+
+# Planes de Terraform y caches de pruebas
+tfplan
+.pytest_cache/
