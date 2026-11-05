@@ -1,5 +1,6 @@
 import json
 import os
+from datetime import datetime, timezone
 
 import boto3
 import pymysql
@@ -10,6 +11,8 @@ app = Flask(__name__)
 # Credenciales de la BD; se cargan en la primera conexión, no al importar,
 # para que las pruebas puedan importar la app sin AWS.
 DB = None
+# Aparte de DB: si la primera conexión falla, la tabla se crea en el siguiente intento.
+TABLE_READY = False
 
 
 def load_db_credentials():
@@ -21,9 +24,8 @@ def load_db_credentials():
 
 
 def get_connection():
-    global DB
-    first_time = DB is None
-    if first_time:
+    global DB, TABLE_READY
+    if DB is None:
         DB = load_db_credentials()
 
     conn = pymysql.connect(
@@ -34,9 +36,11 @@ def get_connection():
         database=DB["dbname"],
         cursorclass=pymysql.cursors.DictCursor,
         autocommit=True,
+        connect_timeout=5,  # que /health reporte FAIL rápido si la BD no responde
     )
-    if first_time:
+    if not TABLE_READY:
         init_db(conn)
+        TABLE_READY = True
     return conn
 
 
@@ -65,10 +69,38 @@ def insert_task(tarea):
         return cur.lastrowid
 
 
+def check_db():
+    with get_connection() as conn, conn.cursor() as cur:
+        cur.execute("SELECT 1")
+
+
+def app_version():
+    # systemd la carga de /etc/todo.env; cada deploy la actualiza con el tag del release.
+    return os.environ.get("APP_VERSION", "dev")
+
+
 @app.get("/version")
 def version():
-    # systemd la carga de /etc/todo.env; cada deploy la actualiza con el tag del release.
-    return jsonify({"version": os.environ.get("APP_VERSION", "dev")})
+    return jsonify({"version": app_version()})
+
+
+@app.get("/health")
+def health():
+    try:
+        check_db()
+        database = "OK"
+    except Exception:
+        app.logger.exception("Health check: la base de datos no responde")
+        database = "FAIL"
+
+    body = {
+        "status": "OK" if database == "OK" else "FAIL",
+        "database": database,
+        "version": app_version(),
+        "timestamp": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+    }
+    # 503 si la BD falla: así el monitor (que exige 200) detecta el problema.
+    return jsonify(body), 200 if database == "OK" else 503
 
 
 @app.get("/tasks")
