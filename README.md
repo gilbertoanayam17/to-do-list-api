@@ -4,14 +4,15 @@ API sencilla de to-do list en Python (Flask). Las tareas se guardan en MySQL (Am
 credenciales se leen de AWS Secrets Manager. Toda la infraestructura sale de Terraform: ver
 [terraform/](terraform/).
 
-| Método | Ruta     | Descripción                     |
-|--------|----------|---------------------------------|
-| GET    | `/tasks` | Regresa la lista de tareas      |
-| POST   | `/tasks` | Agrega una tarea `{"tarea": "..."}` |
+| Método | Ruta       | Descripción                         |
+|--------|------------|-------------------------------------|
+| GET    | `/tasks`   | Regresa la lista de tareas          |
+| POST   | `/tasks`   | Agrega una tarea `{"tarea": "..."}` |
+| GET    | `/version` | Versión desplegada `{"version": "v1.0.0"}` |
 
 ## Configuración
 
-La app no tiene credenciales en el código. Al arrancar lee el secreto indicado en
+La app no tiene credenciales en el código. En la primera petición lee el secreto indicado en
 `DB_SECRET_ID` (JSON con `host`, `port`, `username`, `password`, `dbname`) usando el rol IAM de
 la instancia, y crea la tabla `tasks` si no existe.
 
@@ -19,12 +20,43 @@ la instancia, y crea la tabla `tasks` si no existe.
 |----------------|-----------------------------|
 | `DB_SECRET_ID` | `to-do-list-db-credentials` |
 | `AWS_REGION`   | `us-east-1`                 |
+| `APP_VERSION`  | `v1.0.0` (en la EC2 vive en `/etc/todo.env`; default `dev`) |
 
 ```bash
 curl http://<IP>:8000/tasks
 curl -X POST http://<IP>:8000/tasks \
   -H "Content-Type: application/json" \
   -d '{"tarea": "resolver actividad en equipo"}'
+curl http://<IP>:8000/version
+```
+
+## Pruebas
+
+Las pruebas reemplazan la capa de base de datos (`fetch_tasks`/`insert_task`) por una lista, así
+que no necesitan AWS ni MySQL:
+
+```bash
+pip install -r requirements-dev.txt
+pytest -v
+```
+
+## CI/CD (GitHub Actions)
+
+| Workflow | Disparador | Qué hace |
+|----------|------------|----------|
+| [CI](.github/workflows/ci.yml) | PR hacia `main` | **Continuous Integration**: corre `pytest`. La regla de `main` exige el check `tests`, así que no se puede hacer merge si fallan |
+| [Release](.github/workflows/release.yml) | push de tag `v#.#.#` | **Continuous Delivery**: corre las pruebas, crea un release con el repo en zip y llama a Deploy |
+| [Deploy](.github/workflows/deploy.yml) | lo llama Release, o a mano con un tag | **Continuous Deployment**: por SSH, la EC2 descarga el zip del release ([scripts/deploy.sh](scripts/deploy.sh)), reinicia la app y verifica `/version`; si no responde, regresa a la versión anterior |
+| [Infra - apply / destroy](.github/workflows/infra-apply.yml) | a mano | Terraform con el tfstate en S3 (ver [terraform/](terraform/)) |
+
+Deploy se encadena desde Release en lugar de usar `on: release`, porque un release creado con
+`GITHUB_TOKEN` no dispara otros workflows.
+
+Publicar una versión:
+
+```bash
+git tag v1.0.0
+git push origin v1.0.0
 ```
 
 ## Parte 2: preguntas
