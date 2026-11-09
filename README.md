@@ -69,6 +69,58 @@ git tag v1.0.0
 git push origin v1.0.0
 ```
 
+## Monitoreo (CloudWatch)
+
+### Estrategia
+
+Queremos enterarnos de tres cosas antes que los usuarios: que la API **falla**, que está
+**lenta**, o que el servidor se está **quedando sin recursos**.
+
+| Métrica | Origen | Alarma (→ SNS → correo) | Por qué ese umbral |
+|---------|--------|-------------------------|--------------------|
+| `ToDoListApi/ServerErrors` | App (`put_metric_data`): 1 si la respuesta es 5xx, 0 si no | `Sum >= 3` en 5 min | Un 5xx es falla nuestra (BD caída, excepción). 3 en 5 min ya no es un error aislado |
+| `ToDoListApi/Latency` (ms) | App (`put_metric_data`): duración de cada petición | `p90 > 1000 ms` en 3 de 5 min | Normalmente tarda decenas de ms; > 1 s es una API lenta. p90 porque el promedio esconde las peticiones lentas |
+| `AWS/EC2/CPUUtilization` | AWS (cada 5 min) | `Average > 80%` 2 periodos de 5 min | t3.micro es burstable: CPU alta sostenida gasta los créditos y la instancia se frena |
+
+Las alarmas avisan también cuando regresan a OK. Sin tráfico no hay datos de las métricas
+propias, y eso se trata como "no rompe el umbral" (`treat_missing_data = notBreaching`).
+
+### Cómo se mandan las métricas
+
+En [app.py](app.py), `after_request` arma las dos métricas de cada petición y las manda en una
+sola llamada a `put_metric_data` (namespace `ToDoListApi`). La llamada se hace con
+`response.call_on_close`, cuando gunicorn ya entregó la respuesta, así el cliente no espera a
+CloudWatch. Si CloudWatch falla, solo se escribe un warning en el log: el monitoreo nunca tumba la
+API. La EC2 se autentica con `LabInstanceProfile`, igual que con Secrets Manager.
+
+Como cada petición publica un dato de `Latency`, su `SampleCount` es el número de peticiones, y el
+`Average` de `ServerErrors` es la tasa de error, sin métricas extra.
+
+### Infraestructura
+
+Todo sale de Terraform ([terraform/monitoring.tf](terraform/monitoring.tf)): el tópico SNS con la
+suscripción por correo, las 3 alarmas y el dashboard `to-do-list` (alarmas, latencia, peticiones
+y errores, CPU de la EC2 y, como contexto, CPU y conexiones de RDS). El correo viene del secret
+`ALERT_EMAIL`. Después del apply llega un correo de AWS para **confirmar la suscripción**; sin eso
+no llegan las alertas (en cada sandbox nuevo hay que volver a confirmar).
+
+### Probar las alarmas
+
+```bash
+# Forzar el estado de una alarma para probar el correo (vuelve sola en la siguiente evaluación)
+aws cloudwatch set-alarm-state --alarm-name to-do-list-errores-5xx \
+  --state-value ALARM --state-reason "Prueba de notificación"
+
+# Generar tráfico para ver las métricas en el dashboard
+for i in $(seq 1 50); do curl -s -o /dev/null http://<IP>:8000/tasks; done
+```
+
+Para provocar errores y latencia reales basta con detener la BD (**RDS → Actions → Stop**): `/tasks`
+responde 500 y `/health` 503 después del `connect_timeout` de 5 s.
+
+El workflow Monitor sigue revisando desde fuera (si la EC2 está apagada la app no puede mandar
+métricas, pero GitHub sí nota que no responde).
+
 ## Parte 2: preguntas
 
 **¿Cómo damos permiso para que un servicio de AWS acceda a otro?**

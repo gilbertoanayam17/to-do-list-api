@@ -6,7 +6,15 @@ import app as todo
 
 
 @pytest.fixture
-def client(monkeypatch):
+def metrics(monkeypatch):
+    # Reemplaza el envío a CloudWatch: guarda cada lote de métricas como un dict {nombre: valor}.
+    sent = []
+    monkeypatch.setattr(todo, "put_metrics", lambda data: sent.append({m["MetricName"]: m["Value"] for m in data}))
+    return sent
+
+
+@pytest.fixture
+def client(monkeypatch, metrics):
     # Reemplaza la capa de base de datos por una lista: las pruebas no tocan RDS ni AWS.
     tasks = []
 
@@ -77,3 +85,47 @@ def test_health_regresa_503_si_falla_la_bd(client, monkeypatch):
     assert response.status_code == 503
     assert response.get_json()["status"] == "FAIL"
     assert response.get_json()["database"] == "FAIL"
+
+
+def test_cada_peticion_manda_latencia_y_errores(client, metrics):
+    client.get("/tasks").close()  # call_on_close corre al cerrar la respuesta
+
+    assert len(metrics) == 1
+    assert metrics[0]["Latency"] >= 0
+    assert metrics[0]["ServerErrors"] == 0
+
+
+def test_health_503_cuenta_como_error(client, metrics, monkeypatch):
+    def db_caida():
+        raise ConnectionError("RDS no responde")
+
+    monkeypatch.setattr(todo, "check_db", db_caida)
+
+    client.get("/health").close()
+
+    assert metrics[0]["ServerErrors"] == 1
+
+
+def test_excepcion_no_manejada_cuenta_como_error(client, metrics, monkeypatch):
+    def bd_caida():
+        raise ConnectionError("RDS no responde")
+
+    monkeypatch.setattr(todo, "fetch_tasks", bd_caida)
+
+    response = client.get("/tasks")
+    response.close()
+
+    assert response.status_code == 500
+    assert metrics[0]["ServerErrors"] == 1
+
+
+def test_si_cloudwatch_falla_la_api_sigue_respondiendo(client, monkeypatch):
+    def cloudwatch_caido(data):
+        raise ConnectionError("CloudWatch no responde")
+
+    monkeypatch.setattr(todo, "put_metrics", cloudwatch_caido)
+
+    response = client.get("/tasks")
+    response.close()
+
+    assert response.status_code == 200

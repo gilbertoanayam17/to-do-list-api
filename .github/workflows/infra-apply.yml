@@ -15,6 +15,9 @@ permissions:
 jobs:
   apply:
     runs-on: ubuntu-latest
+    env:
+      # Correo que recibe las alarmas (variable alert_email de Terraform).
+      TF_VAR_alert_email: ${{ secrets.ALERT_EMAIL }}
     steps:
       - uses: actions/checkout@v4
 
@@ -45,11 +48,14 @@ jobs:
         run: |
           IP=$(terraform -chdir=terraform output -raw server_public_ip)
           URL=$(terraform -chdir=terraform output -raw api_url)
+          DASHBOARD=$(terraform -chdir=terraform output -raw dashboard_url)
           {
             echo "## Infraestructura lista"
             echo ""
             echo "- IP de la EC2: \`$IP\`"
             echo "- API: $URL (tarda 1-2 min en responder tras el boot)"
+            echo "- Dashboard: $DASHBOARD"
             echo ""
             echo "Actualiza el secret **EC2_HOST** con \`$IP\` para que el deploy funcione."
+            echo "Si el tópico SNS es nuevo, confirma la suscripción en el correo de AWS para recibir las alarmas."
           } >> "$GITHUB_STEP_SUMMARY"

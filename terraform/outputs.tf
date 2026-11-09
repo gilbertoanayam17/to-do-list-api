@@ -22,3 +22,13 @@ output "db_secret_name" {
   description = "Secreto de Secrets Manager con las credenciales de la BD"
   value       = aws_secretsmanager_secret.db.name
 }
+
+output "dashboard_url" {
+  description = "Dashboard de CloudWatch con las métricas y alarmas de la API"
+  value       = "https://${var.region}.console.aws.amazon.com/cloudwatch/home?region=${var.region}#dashboards/dashboard/${aws_cloudwatch_dashboard.main.dashboard_name}"
+}
+
+output "alarms_topic_arn" {
+  description = "Tópico SNS al que avisan las alarmas"
+  value       = aws_sns_topic.alarms.arn
+}

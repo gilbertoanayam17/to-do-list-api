@@ -63,3 +63,13 @@ variable "db_username" {
   type        = string
   default     = "todo_admin"
 }
+
+variable "alert_email" {
+  description = "Correo que recibe las alarmas de CloudWatch (en CI sale del secret ALERT_EMAIL)"
+  type        = string
+
+  validation {
+    condition     = can(regex("^[^@\\s]+@[^@\\s]+\\.[^@\\s]+$", var.alert_email))
+    error_message = "alert_email debe ser un correo válido."
+  }
+}
