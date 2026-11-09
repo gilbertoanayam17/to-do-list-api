@@ -1,12 +1,18 @@
 import json
 import os
+import time
 from datetime import datetime, timezone
 
 import boto3
 import pymysql
-from flask import Flask, jsonify, request
+from botocore.config import Config
+from flask import Flask, g, jsonify, request
 
 app = Flask(__name__)
+
+# Namespace de las métricas propias en CloudWatch (los que empiezan con AWS/ son reservados).
+METRICS_NAMESPACE = "ToDoListApi"
+CLOUDWATCH = None
 
 # Credenciales de la BD; se cargan en la primera conexión, no al importar,
 # para que las pruebas puedan importar la app sin AWS.
@@ -77,6 +83,48 @@ def check_db():
 def app_version():
     # systemd la carga de /etc/todo.env; cada deploy la actualiza con el tag del release.
     return os.environ.get("APP_VERSION", "dev")
+
+
+def put_metrics(metric_data):
+    global CLOUDWATCH
+    if CLOUDWATCH is None:
+        # Timeouts cortos: si CloudWatch no responde, el worker no se queda colgado 60 s (default).
+        CLOUDWATCH = boto3.client(
+            "cloudwatch",
+            region_name=os.environ.get("AWS_REGION", "us-east-1"),
+            config=Config(connect_timeout=2, read_timeout=2, retries={"max_attempts": 2}),
+        )
+    CLOUDWATCH.put_metric_data(Namespace=METRICS_NAMESPACE, MetricData=metric_data)
+
+
+def send_metrics(metric_data):
+    # El monitoreo nunca debe tumbar la API: si falla el envío, solo se registra en el log.
+    try:
+        put_metrics(metric_data)
+    except Exception:
+        app.logger.warning("No se pudieron enviar métricas a CloudWatch", exc_info=True)
+
+
+@app.before_request
+def start_timer():
+    g.start = time.perf_counter()
+
+
+@app.after_request
+def record_metrics(response):
+    # Corre también para los 500 de excepciones no manejadas (Flask arma la respuesta y luego
+    # llama a after_request), así que los errores de la BD en /tasks sí se cuentan.
+    latency_ms = (time.perf_counter() - g.get("start", time.perf_counter())) * 1000
+    metric_data = [
+        {"MetricName": "Latency", "Value": latency_ms, "Unit": "Milliseconds"},
+        # 1 por cada 5xx y 0 si no: Sum = número de errores, Average = tasa de error,
+        # SampleCount = número de peticiones.
+        {"MetricName": "ServerErrors", "Value": 1 if response.status_code >= 500 else 0, "Unit": "Count"},
+    ]
+    # call_on_close: put_metric_data se llama cuando gunicorn ya mandó la respuesta,
+    # así el cliente no espera la llamada a CloudWatch.
+    response.call_on_close(lambda: send_metrics(metric_data))
+    return response
 
 
 @app.get("/version")

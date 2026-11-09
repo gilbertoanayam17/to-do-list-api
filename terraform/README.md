@@ -8,6 +8,9 @@ Provisiona en AWS (default VPC, `us-east-1`):
 - Una **base de datos RDS** MySQL `db.t3.micro`, privada, con su subnet group
 - Un **Security Group para RDS** que solo acepta 3306 desde el SG de la EC2
 - Un **secreto en Secrets Manager** con las credenciales (password generado con `random_password`)
+- **Monitoreo** ([`monitoring.tf`](monitoring.tf)): tópico **SNS** con suscripción por correo, 3
+  **alarmas de CloudWatch** (errores 5xx, latencia, CPU de la EC2) y un **dashboard**. Ver
+  [Monitoreo](../README.md#monitoreo-cloudwatch)
 
 El despliegue inicial también sale de Terraform: [`user_data.sh`](user_data.sh) se ejecuta en el
 primer boot, clona este repo en `/opt/todo/app`, instala dependencias en `/opt/todo/venv` y
@@ -32,6 +35,7 @@ Secrets del repo (**Settings → Secrets and variables → Actions**):
 | `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN` | Cada sandbox nuevo (Learner Lab → AWS Details) |
 | `EC2_HOST` | Después de cada apply (IP que muestra el resumen del run) |
 | `EC2_SSH_KEY` | Una sola vez: contenido de la llave privada `~/.ssh/to-do-list-deploy` |
+| `ALERT_EMAIL` | Una sola vez: correo que recibe las alarmas (variable `alert_email`) |
 
 ## ¿Dónde vive el tfstate?
 
@@ -47,6 +51,7 @@ El bucket no lo administra Terraform, por eso sobrevive al `destroy`.
 
 ```bash
 bash scripts/tf-init.sh               # desde la raíz del repo
+export TF_VAR_alert_email=tu@correo.com
 terraform -chdir=terraform plan
 terraform -chdir=terraform apply
 ```
