@@ -1,14 +1,11 @@
 name: CI
 
-# Continuous Integration: corre las pruebas en cada PR hacia main.
-# Para que bloquee el merge si fallan, la regla de la rama main debe exigir el check "tests".
+# Corre las pruebas en cada PR hacia main. La regla de main exige que el check "tests" pase
+# para poder hacer merge. Release también lo usa antes de publicar.
 on:
   pull_request:
     branches: [main]
-  workflow_call: # Release lo reutiliza antes de publicar
-
-permissions:
-  contents: read
+  workflow_call:
 
 jobs:
   tests:
@@ -16,12 +13,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # Misma versión de Python que trae Ubuntu 24.04 en la EC2.
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.12"
-          cache: pip
+          python-version: "3.12" # la misma que trae Ubuntu 24.04 en la EC2
 
-      - run: pip install -r requirements-dev.txt
-
-      - run: pytest -v
+      - run: pip install -r requirements.txt pytest
+      - run: python -m pytest -v

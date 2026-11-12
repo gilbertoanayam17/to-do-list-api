@@ -1,0 +1,66 @@
+{
+  "widgets": [
+    {
+      "type": "alarm",
+      "x": 0,
+      "y": 0,
+      "width": 24,
+      "height": 3,
+      "properties": {
+        "title": "Alarmas",
+        "alarms": ["${alarm_db_errors}", "${alarm_latency}", "${alarm_cpu}"]
+      }
+    },
+    {
+      "type": "metric",
+      "x": 0,
+      "y": 3,
+      "width": 8,
+      "height": 6,
+      "properties": {
+        "title": "Errores de RDS (cada 5 min)",
+        "region": "${region}",
+        "view": "timeSeries",
+        "stat": "Sum",
+        "period": 300,
+        "metrics": [["ToDoListApi", "DatabaseErrors"]],
+        "annotations": { "horizontal": [{ "label": "Alarma", "value": 3 }] }
+      }
+    },
+    {
+      "type": "metric",
+      "x": 8,
+      "y": 3,
+      "width": 8,
+      "height": 6,
+      "properties": {
+        "title": "Latencia de la API (ms)",
+        "region": "${region}",
+        "view": "timeSeries",
+        "period": 60,
+        "metrics": [
+          ["ToDoListApi", "Latency", { "stat": "p50", "label": "p50" }],
+          ["ToDoListApi", "Latency", { "stat": "p90", "label": "p90" }]
+        ],
+        "annotations": { "horizontal": [{ "label": "Alarma p90", "value": 1000 }] }
+      }
+    },
+    {
+      "type": "metric",
+      "x": 16,
+      "y": 3,
+      "width": 8,
+      "height": 6,
+      "properties": {
+        "title": "CPU de la EC2 (%)",
+        "region": "${region}",
+        "view": "timeSeries",
+        "stat": "Average",
+        "period": 300,
+        "metrics": [["AWS/EC2", "CPUUtilization", "InstanceId", "${instance_id}"]],
+        "yAxis": { "left": { "min": 0, "max": 100 } },
+        "annotations": { "horizontal": [{ "label": "Alarma", "value": 80 }] }
+      }
+    }
+  ]
+}

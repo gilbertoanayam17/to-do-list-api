@@ -1,31 +1,27 @@
 import json
 import os
 import time
+from contextlib import contextmanager
 from datetime import datetime, timezone
 
 import boto3
 import pymysql
-from botocore.config import Config
 from flask import Flask, g, jsonify, request
 
 app = Flask(__name__)
 
-# Namespace de las métricas propias en CloudWatch (los que empiezan con AWS/ son reservados).
-METRICS_NAMESPACE = "ToDoListApi"
-CLOUDWATCH = None
+REGION = os.environ.get("AWS_REGION", "us-east-1")
+cloudwatch = boto3.client("cloudwatch", region_name=REGION)
 
-# Credenciales de la BD; se cargan en la primera conexión, no al importar,
-# para que las pruebas puedan importar la app sin AWS.
+# Las credenciales de la BD se leen de Secrets Manager en la primera conexión
+# (no al importar, así las pruebas no necesitan AWS).
 DB = None
-# Aparte de DB: si la primera conexión falla, la tabla se crea en el siguiente intento.
 TABLE_READY = False
 
 
 def load_db_credentials():
-    # Las credenciales viven en Secrets Manager, no en el código.
-    # boto3 se autentica con el rol IAM de la instancia (instance profile).
-    client = boto3.client("secretsmanager", region_name=os.environ.get("AWS_REGION", "us-east-1"))
-    secret = client.get_secret_value(SecretId=os.environ["DB_SECRET_ID"])
+    secrets = boto3.client("secretsmanager", region_name=REGION)
+    secret = secrets.get_secret_value(SecretId=os.environ["DB_SECRET_ID"])
     return json.loads(secret["SecretString"])
 
 
@@ -42,67 +38,66 @@ def get_connection():
         database=DB["dbname"],
         cursorclass=pymysql.cursors.DictCursor,
         autocommit=True,
-        connect_timeout=5,  # que /health reporte FAIL rápido si la BD no responde
+        connect_timeout=5,
     )
     if not TABLE_READY:
-        init_db(conn)
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS tasks (
+                    id INT AUTO_INCREMENT PRIMARY KEY,
+                    title VARCHAR(255) NOT NULL,
+                    done BOOLEAN NOT NULL DEFAULT FALSE,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+                """
+            )
         TABLE_READY = True
     return conn
 
 
-def init_db(conn):
-    with conn.cursor() as cur:
-        cur.execute(
-            """
-            CREATE TABLE IF NOT EXISTS tasks (
-                id INT AUTO_INCREMENT PRIMARY KEY,
-                tarea VARCHAR(255) NOT NULL,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-            """
+def put_metric(name, value, unit):
+    # Si CloudWatch falla no tumbamos la API, solo queda en el log.
+    try:
+        cloudwatch.put_metric_data(
+            Namespace="ToDoListApi",
+            MetricData=[{"MetricName": name, "Value": value, "Unit": unit}],
         )
+    except Exception:
+        app.logger.warning("No se pudo mandar la métrica %s", name, exc_info=True)
+
+
+@contextmanager
+def db_cursor():
+    # Todas las lecturas y escrituras a RDS pasan por aquí para contar los errores.
+    try:
+        with get_connection() as conn, conn.cursor() as cur:
+            yield cur
+    except Exception:
+        put_metric("DatabaseErrors", 1, "Count")
+        raise
 
 
 def fetch_tasks():
-    with get_connection() as conn, conn.cursor() as cur:
-        cur.execute("SELECT id, tarea FROM tasks ORDER BY id")
-        return cur.fetchall()
+    with db_cursor() as cur:
+        cur.execute("SELECT id, title, done FROM tasks ORDER BY id")
+        return [{**task, "done": bool(task["done"])} for task in cur.fetchall()]
 
 
-def insert_task(tarea):
-    with get_connection() as conn, conn.cursor() as cur:
-        cur.execute("INSERT INTO tasks (tarea) VALUES (%s)", (tarea,))
+def insert_task(title, done):
+    with db_cursor() as cur:
+        cur.execute("INSERT INTO tasks (title, done) VALUES (%s, %s)", (title, done))
         return cur.lastrowid
 
 
 def check_db():
-    with get_connection() as conn, conn.cursor() as cur:
+    with db_cursor() as cur:
         cur.execute("SELECT 1")
 
 
 def app_version():
-    # systemd la carga de /etc/todo.env; cada deploy la actualiza con el tag del release.
+    # En la EC2 viene de /etc/todo.env; el workflow de deploy la cambia con cada release.
     return os.environ.get("APP_VERSION", "dev")
-
-
-def put_metrics(metric_data):
-    global CLOUDWATCH
-    if CLOUDWATCH is None:
-        # Timeouts cortos: si CloudWatch no responde, el worker no se queda colgado 60 s (default).
-        CLOUDWATCH = boto3.client(
-            "cloudwatch",
-            region_name=os.environ.get("AWS_REGION", "us-east-1"),
-            config=Config(connect_timeout=2, read_timeout=2, retries={"max_attempts": 2}),
-        )
-    CLOUDWATCH.put_metric_data(Namespace=METRICS_NAMESPACE, MetricData=metric_data)
-
-
-def send_metrics(metric_data):
-    # El monitoreo nunca debe tumbar la API: si falla el envío, solo se registra en el log.
-    try:
-        put_metrics(metric_data)
-    except Exception:
-        app.logger.warning("No se pudieron enviar métricas a CloudWatch", exc_info=True)
 
 
 @app.before_request
@@ -111,19 +106,9 @@ def start_timer():
 
 
 @app.after_request
-def record_metrics(response):
-    # Corre también para los 500 de excepciones no manejadas (Flask arma la respuesta y luego
-    # llama a after_request), así que los errores de la BD en /tasks sí se cuentan.
-    latency_ms = (time.perf_counter() - g.get("start", time.perf_counter())) * 1000
-    metric_data = [
-        {"MetricName": "Latency", "Value": latency_ms, "Unit": "Milliseconds"},
-        # 1 por cada 5xx y 0 si no: Sum = número de errores, Average = tasa de error,
-        # SampleCount = número de peticiones.
-        {"MetricName": "ServerErrors", "Value": 1 if response.status_code >= 500 else 0, "Unit": "Count"},
-    ]
-    # call_on_close: put_metric_data se llama cuando gunicorn ya mandó la respuesta,
-    # así el cliente no espera la llamada a CloudWatch.
-    response.call_on_close(lambda: send_metrics(metric_data))
+def send_latency(response):
+    latency_ms = (time.perf_counter() - g.start) * 1000
+    put_metric("Latency", latency_ms, "Milliseconds")
     return response
 
 
@@ -138,16 +123,15 @@ def health():
         check_db()
         database = "OK"
     except Exception:
-        app.logger.exception("Health check: la base de datos no responde")
         database = "FAIL"
 
     body = {
-        "status": "OK" if database == "OK" else "FAIL",
+        "status": database,
         "database": database,
         "version": app_version(),
         "timestamp": datetime.now(timezone.utc).isoformat(timespec="seconds"),
     }
-    # 503 si la BD falla: así el monitor (que exige 200) detecta el problema.
+    # 503 cuando la BD falla, para que el health check de GitHub Actions lo detecte.
     return jsonify(body), 200 if database == "OK" else 503
 
 
@@ -159,16 +143,18 @@ def list_tasks():
 @app.post("/tasks")
 def add_task():
     body = request.get_json(silent=True) or {}
-    tarea = body.get("tarea")
-    if not isinstance(tarea, str) or not tarea.strip():
-        return jsonify({"error": "Se requiere el campo 'tarea' (texto no vacio)"}), 400
-    if len(tarea.strip()) > 255:
-        return jsonify({"error": "'tarea' no puede pasar de 255 caracteres"}), 400
+    title = body.get("title")
+    done = body.get("done", False)
 
-    tarea = tarea.strip()
-    return jsonify({"id": insert_task(tarea), "tarea": tarea}), 201
+    if not isinstance(title, str) or not title.strip() or len(title.strip()) > 255:
+        return jsonify({"error": "'title' es obligatorio (texto de 1 a 255 caracteres)"}), 400
+    if not isinstance(done, bool):
+        return jsonify({"error": "'done' debe ser true o false"}), 400
+
+    title = title.strip()
+    task_id = insert_task(title, done)
+    return jsonify({"id": task_id, "title": title, "done": done}), 201
 
 
 if __name__ == "__main__":
-    # 0.0.0.0 para aceptar conexiones desde fuera de la instancia, no solo localhost.
     app.run(host="0.0.0.0", port=8000)

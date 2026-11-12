@@ -1,8 +1,7 @@
 name: Deploy
 
 # Continuous Deployment: la EC2 descarga el zip del release y reinicia la app con esa versión.
-# Lo llama Release al publicar un tag; también se puede correr a mano para redesplegar
-# un release existente (por ejemplo, después de levantar la infra en un sandbox nuevo).
+# Lo llama Release al publicar un tag; también se puede correr a mano con un tag existente.
 on:
   workflow_call:
     inputs:
@@ -14,48 +13,38 @@ on:
       tag:
         description: "Tag del release a desplegar (ej. v1.0.0)"
         required: true
-        type: string
-
-permissions:
-  contents: read
 
 jobs:
   deploy:
     runs-on: ubuntu-latest
-    # Un deploy a la vez sobre la EC2.
-    concurrency:
-      group: deploy
-      cancel-in-progress: false
     env:
       TAG: ${{ inputs.tag }}
-      REPO: ${{ github.repository }}
       EC2_HOST: ${{ secrets.EC2_HOST }}
+      ZIP_URL: https://github.com/${{ github.repository }}/releases/download/${{ inputs.tag }}/to-do-list-api-${{ inputs.tag }}.zip
     steps:
-      # Usa el deploy.sh de la versión que se despliega.
-      - uses: actions/checkout@v4
-        with:
-          ref: ${{ inputs.tag }}
-
-      - name: Configurar llave SSH
+      - name: Llave SSH
         env:
           EC2_SSH_KEY: ${{ secrets.EC2_SSH_KEY }}
         run: |
-          install -m 700 -d ~/.ssh
-          printf '%s\n' "$EC2_SSH_KEY" > ~/.ssh/ec2
+          mkdir -p ~/.ssh
+          echo "$EC2_SSH_KEY" > ~/.ssh/ec2
           chmod 600 ~/.ssh/ec2
-          ssh-keyscan -H "$EC2_HOST" >> ~/.ssh/known_hosts
 
-      - name: Desplegar en la EC2
-        run: ssh -i ~/.ssh/ec2 "ubuntu@$EC2_HOST" "sudo bash -s -- '$REPO' '$TAG'" < scripts/deploy.sh
-
-      - name: Verificar desde internet
+      - name: Descargar el release en la EC2 y reiniciar
         run: |
-          VERSION=$(curl -fsS "http://$EC2_HOST:8000/version")
-          echo "$VERSION"
-          [[ "$VERSION" == *"\"$TAG\""* ]] || { echo "La EC2 no responde con $TAG"; exit 1; }
-          {
-            echo "## Desplegado $TAG"
-            echo ""
-            echo "- http://$EC2_HOST:8000/version"
-            echo "- http://$EC2_HOST:8000/tasks"
-          } >> "$GITHUB_STEP_SUMMARY"
+          # shellcheck disable=SC2087 # $TAG y $ZIP_URL se sustituyen aquí, antes de mandarlos a la EC2
+          ssh -i ~/.ssh/ec2 -o StrictHostKeyChecking=no "ubuntu@$EC2_HOST" <<EOF
+            set -e
+            cd /tmp
+            rm -rf release.zip to-do-list-api
+            curl -fsSL -o release.zip $ZIP_URL
+            unzip -q release.zip
+            rm -rf /opt/todo/app
+            mv to-do-list-api /opt/todo/app
+            /opt/todo/venv/bin/pip install -q -r /opt/todo/app/requirements.txt
+            echo "APP_VERSION=$TAG" | sudo tee /etc/todo.env
+            sudo systemctl restart todo
+          EOF
+
+      - name: Confirmar la versión con GET /version
+        run: curl -fsS --retry 5 --retry-connrefused --retry-delay 2 "http://$EC2_HOST:8000/version" | grep "$TAG"

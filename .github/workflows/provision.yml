@@ -1,0 +1,38 @@
+name: Provision
+
+# Crea o actualiza la infraestructura. Se corre a mano: Actions > Provision > Run workflow
+on:
+  workflow_dispatch:
+
+# Un solo terraform a la vez (provision y destroy comparten el tfstate)
+concurrency: terraform
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: terraform
+    env:
+      TF_VAR_alert_email: ${{ secrets.ALERT_EMAIL }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # Credenciales del Learner Lab (AWS Details); cambian con cada sesión
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
+          aws-region: us-east-1
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.9.8
+          terraform_wrapper: false
+
+      - run: terraform init
+      - run: terraform apply -auto-approve
+
+      - name: Resumen (copia la IP al secret EC2_HOST)
+        run: terraform output | tee -a "$GITHUB_STEP_SUMMARY"
