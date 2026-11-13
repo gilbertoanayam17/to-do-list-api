@@ -1,25 +1,22 @@
-name: Infra - destroy
+name: Destroy
 
-# Se dispara a mano y pide escribir "destroy" para evitar borrar todo por un clic accidental.
+# Borra toda la infraestructura. Se corre a mano y pide escribir "destroy" para confirmar.
 on:
   workflow_dispatch:
     inputs:
       confirmacion:
         description: 'Escribe "destroy" para confirmar'
         required: true
-        type: string
 
-concurrency:
-  group: terraform
-  cancel-in-progress: false
-
-permissions:
-  contents: read
+concurrency: terraform
 
 jobs:
   destroy:
     if: inputs.confirmacion == 'destroy'
     runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: terraform
     env:
       TF_VAR_alert_email: ${{ secrets.ALERT_EMAIL }}
     steps:
@@ -34,12 +31,7 @@ jobs:
 
       - uses: hashicorp/setup-terraform@v3
         with:
-          terraform_version: "~1.13.0"
-          terraform_wrapper: false
+          terraform_version: 1.9.8
 
-      - name: terraform init (backend S3)
-        run: bash scripts/tf-init.sh -backend-config=use_lockfile=true
-
-      # El bucket del tfstate no lo administra Terraform, así que sobrevive al destroy.
-      - name: terraform destroy
-        run: terraform -chdir=terraform destroy -input=false -auto-approve
+      - run: terraform init
+      - run: terraform destroy -auto-approve

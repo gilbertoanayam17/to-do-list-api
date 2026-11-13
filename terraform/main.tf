@@ -1,7 +1,7 @@
 terraform {
-  # El tfstate vive en S3 para que GitHub Actions (y cualquier máquina) compartan el mismo estado.
-  # El bucket lleva el ID de la cuenta, así que se pasa en el init: ver scripts/tf-init.sh
+  # El tfstate vive en S3, nunca en el repo. El bucket se crea una sola vez con terraform/bootstrap.
   backend "s3" {
+    bucket  = "to-do-list-tfstate-639932174029"
     key     = "to-do-list/terraform.tfstate"
     region  = "us-east-1"
     encrypt = true
@@ -28,15 +28,11 @@ data "aws_vpc" "default" {
   default = true
 }
 
-# Subnets default de la VPC (use1-az3 no ofrece t3.micro).
+# Subnets de la VPC default (en use1-az3 no hay t3.micro)
 data "aws_subnets" "default" {
   filter {
     name   = "vpc-id"
     values = [data.aws_vpc.default.id]
-  }
-  filter {
-    name   = "default-for-az"
-    values = ["true"]
   }
   filter {
     name   = "availability-zone-id"
@@ -44,10 +40,10 @@ data "aws_subnets" "default" {
   }
 }
 
-### AMI: Ubuntu 24.04 LTS oficial de Canonical
+### Ubuntu 24.04
 data "aws_ami" "ubuntu" {
   most_recent = true
-  owners      = ["099720109477"]
+  owners      = ["099720109477"] # Canonical
 
   filter {
     name   = "name"
@@ -56,14 +52,13 @@ data "aws_ami" "ubuntu" {
 }
 
 ### SSH KEY
-# La llave pública vive en el repo; la privada solo en el secret EC2_SSH_KEY de GitHub.
-# Así la llave no cambia en cada sandbox nuevo y el workflow de deploy siempre puede entrar.
+# La pública está en el repo y la privada en el secret EC2_SSH_KEY (la usa el workflow de deploy).
 resource "aws_key_pair" "todo-key" {
   key_name   = "${var.project_name}-key"
   public_key = file("${path.module}/deploy_key.pub")
 }
 
-### SECURITY GROUP
+### SECURITY GROUPS
 resource "aws_security_group" "todo-sg" {
   name        = "${var.project_name}-sg"
   description = "SSH y puerto de la API"
@@ -74,7 +69,7 @@ resource "aws_security_group" "todo-sg" {
     from_port   = 22
     to_port     = 22
     protocol    = "tcp"
-    cidr_blocks = [var.allowed_ssh_cidr]
+    cidr_blocks = ["0.0.0.0/0"]
   }
 
   ingress {
@@ -93,7 +88,7 @@ resource "aws_security_group" "todo-sg" {
   }
 }
 
-### SECURITY GROUP de RDS: MySQL solo acepta conexiones que vengan del SG de la EC2
+# MySQL solo acepta conexiones desde la EC2
 resource "aws_security_group" "rds-sg" {
   name        = "${var.project_name}-rds-sg"
   description = "MySQL solo desde la EC2 de la API"
@@ -111,7 +106,6 @@ resource "aws_security_group" "rds-sg" {
 ### RDS (MySQL)
 resource "random_password" "db" {
   length           = 24
-  special          = true
   override_special = "!#$%&*()-_=+[]{}<>:?" // RDS no acepta / @ " ni espacios
 }
 
@@ -124,28 +118,21 @@ resource "aws_db_instance" "todo-db" {
   identifier              = "${var.project_name}-db"
   engine                  = "mysql"
   engine_version          = "8.4"
-  instance_class          = var.db_instance_class
+  instance_class          = "db.t3.micro"
   allocated_storage       = 20
-  storage_type            = "gp2"
-  db_name                 = var.db_name
-  username                = var.db_username
+  db_name                 = "todo"
+  username                = "todo_admin"
   password                = random_password.db.result
   db_subnet_group_name    = aws_db_subnet_group.todo-db.name
   vpc_security_group_ids  = [aws_security_group.rds-sg.id]
-  publicly_accessible     = false
-  backup_retention_period = 0
-  skip_final_snapshot     = true // para que terraform destroy no deje un snapshot
-  apply_immediately       = true
-
-  tags = {
-    Name = "${var.project_name}-db"
-  }
+  backup_retention_period = 0    // sin backups: es un sandbox y así se crea más rápido
+  skip_final_snapshot     = true // para que destroy no deje un snapshot
 }
 
-### SECRETS MANAGER: credenciales de la BD fuera del código
+### SECRETS MANAGER: la app lee de aquí las credenciales de la BD
 resource "aws_secretsmanager_secret" "db" {
   name                    = "${var.project_name}-db-credentials"
-  recovery_window_in_days = 0 // borrado inmediato en destroy; si no, el nombre queda apartado 7+ días
+  recovery_window_in_days = 0 // se borra en el destroy y el nombre se puede volver a usar
 }
 
 resource "aws_secretsmanager_secret_version" "db" {
@@ -159,39 +146,58 @@ resource "aws_secretsmanager_secret_version" "db" {
   })
 }
 
-### IAM: permiso para que la EC2 lea el secreto
-# En el Learner Lab no se pueden crear roles; se usa el instance profile existente
-# (LabInstanceProfile -> LabRole). En una cuenta normal se crearía un aws_iam_role que
-# confíe en ec2.amazonaws.com, con una policy que permita secretsmanager:GetSecretValue
-# sobre este secreto, y un aws_iam_instance_profile con ese rol.
-data "aws_iam_instance_profile" "lab" {
-  name = var.instance_profile_name
-}
-
 ### EC2
 resource "aws_instance" "server" {
-  ami                         = data.aws_ami.ubuntu.id
-  instance_type               = var.instance_type
-  subnet_id                   = sort(data.aws_subnets.default.ids)[0]
-  key_name                    = aws_key_pair.todo-key.key_name
-  vpc_security_group_ids      = [aws_security_group.todo-sg.id]
-  associate_public_ip_address = true
-  iam_instance_profile        = data.aws_iam_instance_profile.lab.name
+  ami                    = data.aws_ami.ubuntu.id
+  instance_type          = var.instance_type
+  subnet_id              = sort(data.aws_subnets.default.ids)[0]
+  key_name               = aws_key_pair.todo-key.key_name
+  vpc_security_group_ids = [aws_security_group.todo-sg.id]
 
-  # Script que corre una sola vez, como root, en el primer boot:
-  # clona el repo, instala dependencias y deja la app como servicio de systemd.
-  # Solo recibe el NOMBRE del secreto; la contraseña nunca pasa por user_data.
-  user_data = templatefile("${path.module}/user_data.sh", {
-    repo_url     = var.repo_url
-    repo_branch  = var.repo_branch
-    app_port     = var.app_port
-    region       = var.region
-    db_secret_id = aws_secretsmanager_secret.db.name
-  })
-  # Si cambia el script, Terraform reemplaza la instancia para que vuelva a correr.
+  # En el Learner Lab no se pueden crear roles IAM; LabInstanceProfile (LabRole) ya tiene
+  # permiso para leer el secreto y mandar métricas a CloudWatch.
+  iam_instance_profile = "LabInstanceProfile"
+
+  # Primer boot: clona el repo, instala dependencias y deja la app corriendo con systemd.
+  user_data = <<-EOF
+    #!/bin/bash
+    set -e
+    apt-get update -y
+    apt-get install -y git python3-venv unzip
+
+    git clone ${var.repo_url} /opt/todo/app
+    python3 -m venv /opt/todo/venv
+    /opt/todo/venv/bin/pip install -r /opt/todo/app/requirements.txt
+
+    # Versión inicial para GET /version; el workflow de deploy la cambia con cada release
+    echo "APP_VERSION=$(git -C /opt/todo/app describe --tags --always)" > /etc/todo.env
+    chown -R ubuntu:ubuntu /opt/todo
+
+    cat > /etc/systemd/system/todo.service <<SERVICE
+    [Unit]
+    Description=to-do-list API
+    After=network-online.target
+
+    [Service]
+    User=ubuntu
+    WorkingDirectory=/opt/todo/app
+    Environment=AWS_REGION=${var.region}
+    Environment=DB_SECRET_ID=${aws_secretsmanager_secret.db.name}
+    EnvironmentFile=/etc/todo.env
+    ExecStart=/opt/todo/venv/bin/gunicorn --bind 0.0.0.0:${var.app_port} --workers 2 app:app
+    Restart=always
+
+    [Install]
+    WantedBy=multi-user.target
+    SERVICE
+
+    systemctl daemon-reload
+    systemctl enable --now todo
+  EOF
+
   user_data_replace_on_change = true
 
-  # La app lee el secreto al arrancar: la BD y el secreto deben existir antes.
+  # Que la BD y el secreto ya existan cuando arranque la app
   depends_on = [aws_secretsmanager_secret_version.db]
 
   tags = {

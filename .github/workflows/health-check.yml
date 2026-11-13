@@ -1,0 +1,22 @@
+name: Health check
+
+# Cada 5 minutos revisa GET /health; si no responde 200 el workflow falla y GitHub avisa por correo.
+# schedule solo corre desde main y GitHub a veces lo retrasa unos minutos.
+# Cuando apagues el lab, desactívalo (Actions > Health check > ... > Disable workflow).
+on:
+  schedule:
+    - cron: "*/5 * * * *"
+  workflow_dispatch:
+
+jobs:
+  health:
+    runs-on: ubuntu-latest
+    steps:
+      - name: GET /health
+        env:
+          EC2_HOST: ${{ secrets.EC2_HOST }}
+        run: |
+          status=$(curl -sS -o health.json -w "%{http_code}" --retry 2 --max-time 10 "http://$EC2_HOST:8000/health")
+          cat health.json
+          echo "HTTP $status"
+          test "$status" = "200"

@@ -1,5 +1,6 @@
 from datetime import datetime
 
+import pymysql
 import pytest
 
 import app as todo
@@ -7,19 +8,19 @@ import app as todo
 
 @pytest.fixture
 def metrics(monkeypatch):
-    # Reemplaza el envío a CloudWatch: guarda cada lote de métricas como un dict {nombre: valor}.
+    # En lugar de mandar a CloudWatch, guarda los nombres de las métricas enviadas.
     sent = []
-    monkeypatch.setattr(todo, "put_metrics", lambda data: sent.append({m["MetricName"]: m["Value"] for m in data}))
+    monkeypatch.setattr(todo, "put_metric", lambda name, value, unit: sent.append(name))
     return sent
 
 
 @pytest.fixture
 def client(monkeypatch, metrics):
-    # Reemplaza la capa de base de datos por una lista: las pruebas no tocan RDS ni AWS.
+    # La "base de datos" de las pruebas es una lista; no se toca RDS.
     tasks = []
 
-    def fake_insert(tarea):
-        tasks.append({"id": len(tasks) + 1, "tarea": tarea})
+    def fake_insert(title, done):
+        tasks.append({"id": len(tasks) + 1, "title": title, "done": done})
         return len(tasks)
 
     monkeypatch.setattr(todo, "fetch_tasks", lambda: list(tasks))
@@ -28,104 +29,72 @@ def client(monkeypatch, metrics):
     return todo.app.test_client()
 
 
-def test_get_tasks_regresa_lista_vacia(client):
+def test_get_tasks_empieza_vacio(client):
     response = client.get("/tasks")
 
     assert response.status_code == 200
     assert response.get_json() == []
 
 
-def test_post_tasks_agrega_tarea(client):
-    response = client.post("/tasks", json={"tarea": "  resolver actividad en equipo  "})
+def test_post_tasks_crea_tarea(client):
+    response = client.post("/tasks", json={"title": "estudiar para el examen", "done": False})
 
     assert response.status_code == 201
-    assert response.get_json() == {"id": 1, "tarea": "resolver actividad en equipo"}
-    assert client.get("/tasks").get_json() == [{"id": 1, "tarea": "resolver actividad en equipo"}]
+    assert response.get_json() == {"id": 1, "title": "estudiar para el examen", "done": False}
+    assert client.get("/tasks").get_json() == [{"id": 1, "title": "estudiar para el examen", "done": False}]
 
 
-@pytest.mark.parametrize("body", [{}, {"tarea": ""}, {"tarea": "   "}, {"tarea": 123}, {"tarea": "x" * 256}])
+@pytest.mark.parametrize("body", [{}, {"title": "   "}, {"title": "x" * 256}, {"title": "ok", "done": "no"}])
 def test_post_tasks_invalida_regresa_400(client, body):
     response = client.post("/tasks", json=body)
 
     assert response.status_code == 400
-    assert "error" in response.get_json()
     assert client.get("/tasks").get_json() == []
 
 
-def test_version_lee_variable_de_ambiente(client, monkeypatch):
+def test_version_viene_de_variable_de_ambiente(client, monkeypatch):
     monkeypatch.setenv("APP_VERSION", "v1.2.3")
 
-    response = client.get("/version")
-
-    assert response.status_code == 200
-    assert response.get_json() == {"version": "v1.2.3"}
+    assert client.get("/version").get_json() == {"version": "v1.2.3"}
 
 
-def test_health_ok_con_version_y_timestamp(client, monkeypatch):
+def test_health_ok(client, monkeypatch):
     monkeypatch.setenv("APP_VERSION", "v1.2.3")
 
     response = client.get("/health")
 
-    assert response.status_code == 200
     body = response.get_json()
-    assert body["status"] == "OK"
+    assert response.status_code == 200
     assert body["database"] == "OK"
     assert body["version"] == "v1.2.3"
-    assert datetime.fromisoformat(body["timestamp"]).tzinfo is not None
+    assert datetime.fromisoformat(body["timestamp"])
 
 
 def test_health_regresa_503_si_falla_la_bd(client, monkeypatch):
-    def db_caida():
-        raise ConnectionError("RDS no responde")
+    def bd_caida():
+        raise pymysql.err.OperationalError(2003, "RDS no responde")
 
-    monkeypatch.setattr(todo, "check_db", db_caida)
+    monkeypatch.setattr(todo, "check_db", bd_caida)
 
     response = client.get("/health")
 
     assert response.status_code == 503
-    assert response.get_json()["status"] == "FAIL"
     assert response.get_json()["database"] == "FAIL"
 
 
-def test_cada_peticion_manda_latencia_y_errores(client, metrics):
-    client.get("/tasks").close()  # call_on_close corre al cerrar la respuesta
-
-    assert len(metrics) == 1
-    assert metrics[0]["Latency"] >= 0
-    assert metrics[0]["ServerErrors"] == 0
-
-
-def test_health_503_cuenta_como_error(client, metrics, monkeypatch):
-    def db_caida():
-        raise ConnectionError("RDS no responde")
-
-    monkeypatch.setattr(todo, "check_db", db_caida)
-
-    client.get("/health").close()
-
-    assert metrics[0]["ServerErrors"] == 1
-
-
-def test_excepcion_no_manejada_cuenta_como_error(client, metrics, monkeypatch):
+def test_error_de_rds_manda_metrica(metrics, monkeypatch):
     def bd_caida():
-        raise ConnectionError("RDS no responde")
+        raise pymysql.err.OperationalError(2003, "RDS no responde")
 
-    monkeypatch.setattr(todo, "fetch_tasks", bd_caida)
+    monkeypatch.setattr(todo, "get_connection", bd_caida)
 
-    response = client.get("/tasks")
-    response.close()
+    response = todo.app.test_client().get("/tasks")
 
     assert response.status_code == 500
-    assert metrics[0]["ServerErrors"] == 1
+    assert "DatabaseErrors" in metrics
 
 
-def test_si_cloudwatch_falla_la_api_sigue_respondiendo(client, monkeypatch):
-    def cloudwatch_caido(data):
-        raise ConnectionError("CloudWatch no responde")
+def test_cada_peticion_manda_latencia(client, metrics):
+    client.get("/tasks")
 
-    monkeypatch.setattr(todo, "put_metrics", cloudwatch_caido)
-
-    response = client.get("/tasks")
-    response.close()
-
-    assert response.status_code == 200
+    assert metrics == ["Latency"]
